@@ -1,0 +1,108 @@
+name: Build Neovim for Ubuntu 20.04
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Neovim tag to build, for example v0.12.2
+        required: true
+        type: string
+  schedule:
+    - cron: "17 6 * * *"
+
+permissions:
+  contents: write
+
+env:
+  TOOL: neovim
+  ASSET_NAME: nvim-linux-x86_64.tar.gz
+  PACKAGE_ROOT: nvim-linux-x86_64
+
+jobs:
+  build:
+    name: Build Neovim
+    runs-on: ubuntu-20.04
+
+    steps:
+      - name: Resolve version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "${INPUT_VERSION}" ]; then
+            version="${INPUT_VERSION}"
+          else
+            version="$(gh api repos/neovim/neovim/releases/latest --jq .tag_name)"
+          fi
+
+          case "${version}" in
+            v*) ;;
+            *)
+              echo "::error::Version must be a Neovim tag like v0.12.2"
+              exit 1
+              ;;
+          esac
+
+          release_tag="${TOOL}-${version}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "release_tag=${release_tag}" >> "${GITHUB_OUTPUT}"
+
+          if gh release view "${release_tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "exists=true" >> "${GITHUB_OUTPUT}"
+            echo "Release ${release_tag} already exists; skipping build."
+          else
+            echo "exists=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Install build dependencies
+        if: steps.version.outputs.exists == 'false'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            curl \
+            gettext \
+            git \
+            ninja-build \
+            pkg-config \
+            unzip
+
+      - name: Clone Neovim
+        if: steps.version.outputs.exists == 'false'
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none --branch "${{ steps.version.outputs.version }}" \
+            https://github.com/neovim/neovim.git neovim
+
+      - name: Build and install Neovim
+        if: steps.version.outputs.exists == 'false'
+        run: |
+          set -euo pipefail
+          make -C neovim CMAKE_BUILD_TYPE=Release CMAKE_INSTALL_PREFIX="${PWD}/package/${PACKAGE_ROOT}" install
+
+      - name: Package archive
+        if: steps.version.outputs.exists == 'false'
+        run: |
+          set -euo pipefail
+          test -x "package/${PACKAGE_ROOT}/bin/nvim"
+          "package/${PACKAGE_ROOT}/bin/nvim" --version
+          tar -czf "${ASSET_NAME}" -C package "${PACKAGE_ROOT}"
+          tar -tzf "${ASSET_NAME}" | grep -qx "${PACKAGE_ROOT}/bin/nvim"
+
+      - name: Create release
+        if: steps.version.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          gh release create "${RELEASE_TAG}" "${ASSET_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "Neovim ${VERSION} for Ubuntu 20.04" \
+            --notes "Built from neovim/neovim ${VERSION} on Ubuntu 20.04 for glibc 2.31 compatibility."
