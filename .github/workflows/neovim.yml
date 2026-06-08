@@ -19,9 +19,14 @@ env:
   PACKAGE_ROOT: nvim-linux-x86_64
 
 jobs:
-  build:
-    name: Build Neovim
-    runs-on: ubuntu-20.04
+  resolve:
+    name: Resolve version
+    runs-on: ubuntu-latest
+
+    outputs:
+      exists: ${{ steps.version.outputs.exists }}
+      release_tag: ${{ steps.version.outputs.release_tag }}
+      version: ${{ steps.version.outputs.version }}
 
     steps:
       - name: Resolve version
@@ -57,12 +62,22 @@ jobs:
             echo "exists=false" >> "${GITHUB_OUTPUT}"
           fi
 
+  build:
+    name: Build Neovim
+    needs: resolve
+    if: needs.resolve.outputs.exists == 'false'
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:20.04
+
+    steps:
       - name: Install build dependencies
-        if: steps.version.outputs.exists == 'false'
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          apt-get update
+          apt-get install -y --no-install-recommends \
             build-essential \
             cmake \
             curl \
@@ -70,23 +85,21 @@ jobs:
             git \
             ninja-build \
             pkg-config \
+            ca-certificates \
             unzip
 
       - name: Clone Neovim
-        if: steps.version.outputs.exists == 'false'
         run: |
           set -euo pipefail
-          git clone --filter=blob:none --branch "${{ steps.version.outputs.version }}" \
+          git clone --filter=blob:none --branch "${{ needs.resolve.outputs.version }}" \
             https://github.com/neovim/neovim.git neovim
 
       - name: Build and install Neovim
-        if: steps.version.outputs.exists == 'false'
         run: |
           set -euo pipefail
           make -C neovim CMAKE_BUILD_TYPE=Release CMAKE_INSTALL_PREFIX="${PWD}/package/${PACKAGE_ROOT}" install
 
       - name: Package archive
-        if: steps.version.outputs.exists == 'false'
         run: |
           set -euo pipefail
           test -x "package/${PACKAGE_ROOT}/bin/nvim"
@@ -94,12 +107,32 @@ jobs:
           tar -czf "${ASSET_NAME}" -C package "${PACKAGE_ROOT}"
           tar -tzf "${ASSET_NAME}" | grep -qx "${PACKAGE_ROOT}/bin/nvim"
 
+      - name: Upload archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ASSET_NAME }}
+          path: ${{ env.ASSET_NAME }}
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs:
+      - resolve
+      - build
+    if: needs.resolve.outputs.exists == 'false'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download archive
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ASSET_NAME }}
+
       - name: Create release
-        if: steps.version.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.version.outputs.version }}
-          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
         run: |
           set -euo pipefail
           gh release create "${RELEASE_TAG}" "${ASSET_NAME}" \
