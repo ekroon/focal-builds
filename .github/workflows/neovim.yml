@@ -13,6 +13,10 @@ on:
 permissions:
   contents: write
 
+defaults:
+  run:
+    shell: bash
+
 env:
   TOOL: neovim
   ASSET_NAME: nvim-linux-x86_64.tar.gz
